@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.uv/
+data/raw/
+data/ohlcv/
+data_samples/
+*.zip
+.pytest_cache/
+.mypy_cache/
