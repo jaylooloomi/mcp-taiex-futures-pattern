@@ -8,3 +8,4 @@ data_samples/
 *.zip
 .pytest_cache/
 .mypy_cache/
+charts/

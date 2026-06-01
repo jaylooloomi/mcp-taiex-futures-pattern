@@ -29,3 +29,15 @@ def test_sorted_by_datetime():
 def test_reports_filtered_count(capsys):
     clean_ticks(_frame([100, 0, 101]))
     assert "filtered" in capsys.readouterr().err.lower()
+
+
+def test_identical_ticks_are_not_dropped():
+    # Same second, same price, same volume = separate real trades; must keep all.
+    dt = pd.to_datetime(["2026-05-29 09:00:00+08:00"] * 3)
+    df = pd.DataFrame({
+        "datetime": dt, "price": [100, 100, 100], "volume": [2, 2, 2],
+        "is_auction": [False] * 3, "expiry": ["202606"] * 3,
+    })
+    out = clean_ticks(df)
+    assert len(out) == 3
+    assert out["volume"].sum() == 6
