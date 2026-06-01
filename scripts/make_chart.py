@@ -2,6 +2,10 @@
 
 Scans a directory for TX_<date>_<timeframe>.json files and embeds every date
 into one HTML with a date dropdown, session selector, and red/black filter.
+Price and volume are drawn in two vertically-stacked, time-synced panes so
+toggling filters never shifts the price candles. Consecutive-red runs in the
+day session are numbered (plain numbers, no marker shape) above the last red
+candle of each run.
 """
 import json
 import sys
@@ -75,13 +79,18 @@ _TEMPLATE = """<!DOCTYPE html>
   .grp button.active { background:#e53935; color:#fff; border-color:#e53935; }
   select { background:#222632; color:#d1d4dc; border:1px solid #2a2e39;
            padding:5px 10px; font-size:13px; border-radius:4px; cursor:pointer; }
-  #wrap { position:relative; width:100vw; height:calc(100vh - 54px); }
-  #chart { width:100%; height:100%; }
-  #legend { position:absolute; top:8px; left:12px; z-index:3; pointer-events:none;
+  #wrap { display:flex; flex-direction:column; width:100vw; height:calc(100vh - 54px); }
+  #pricePane { position:relative; flex:3 1 0; min-height:0; }
+  #volPane { flex:1 1 0; min-height:0; border-top:1px solid #2a2e39; }
+  #legend { position:absolute; top:8px; left:12px; z-index:4; pointer-events:none;
             font-size:13px; background:rgba(22,26,37,0.85); padding:6px 10px;
             border-radius:4px; border:1px solid #2a2e39; white-space:nowrap; }
   #legend .k { color:#6b7280; margin:0 2px 0 8px; }
   #legend .t { color:#d1d4dc; font-weight:600; }
+  #numLayer { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:3; }
+  #numLayer span { position:absolute; font-size:12px; font-weight:700; white-space:nowrap; }
+  #numLayer .num-red { transform:translate(-50%,-100%); color:#e53935; }   /* 紅群在上方 */
+  #numLayer .num-black { transform:translate(-50%,0); color:#ffffff; }      /* 黑群在下方 */
 </style>
 </head>
 <body>
@@ -106,8 +115,11 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
 </header>
 <div id="wrap">
-  <div id="legend"></div>
-  <div id="chart"></div>
+  <div id="pricePane">
+    <div id="legend"></div>
+    <div id="numLayer"></div>
+  </div>
+  <div id="volPane"></div>
 </div>
 <script>
   const DATA = __DATA__;
@@ -117,44 +129,91 @@ _TEMPLATE = """<!DOCTYPE html>
   let curSession = 'all';
   const curDirs = new Set(['red', 'black']);
 
-  const chart = LightweightCharts.createChart(document.getElementById('chart'), {
-    layout: { background: { color: '#161a25' }, textColor: '#d1d4dc' },
-    grid: { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' },
-    rightPriceScale: { borderColor: '#2a2e39' },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    localization: {
-      timeFormatter: (t) => {
-        const d = new Date(t * 1000);
-        const p = (n) => String(n).padStart(2, '0');
-        return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} `
-             + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
-      },
-    },
-  });
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: '#e53935', downColor: '#ffffff',
-    borderUpColor: '#e53935', borderDownColor: '#cfcfcf',
-    wickUpColor: '#e53935', wickDownColor: '#cfcfcf',
-  });
-  const volumeSeries = chart.addHistogramSeries({
-    priceFormat: { type: 'volume' }, priceScaleId: 'vol',
-  });
-  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-
-  // ---- OHLCV legend (updates on crosshair move) ----
-  const legend = document.getElementById('legend');
   const pad = (n) => String(n).padStart(2, '0');
-  function fmtTime(t) {
+  const fmtTime = (t) => {
     const d = new Date(t * 1000);
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} `
          + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  };
+  const localization = { timeFormatter: fmtTime };
+  const layout = { background: { color: '#161a25' }, textColor: '#d1d4dc' };
+  const grid = { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } };
+
+  // ---- price pane (candles) ----
+  const priceChart = LightweightCharts.createChart(document.getElementById('pricePane'), {
+    autoSize: true, layout, grid, localization,
+    rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 72 },
+    timeScale: { visible: false, borderColor: '#2a2e39' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  // Price scale follows ALL candles in the visible time window (including
+  // ones hidden by the red/black filter), so toggling filters never rescales
+  // the right axis and the candles stay put vertically.
+  function priceAutoscale() {
+    const day = DATA[curDate];
+    const lr = priceChart.timeScale().getVisibleLogicalRange();
+    if (!lr || !day) return null;
+    const from = Math.max(0, Math.floor(lr.from));
+    const to = Math.min(day.candles.length - 1, Math.ceil(lr.to));
+    let lo = Infinity, hi = -Infinity;
+    for (let i = from; i <= to; i++) {
+      const c = day.candles[i];
+      if (c.low < lo) lo = c.low;
+      if (c.high > hi) hi = c.high;
+    }
+    if (!isFinite(lo) || !isFinite(hi)) return null;
+    return { priceRange: { minValue: lo, maxValue: hi } };
   }
+  const candleSeries = priceChart.addCandlestickSeries({
+    upColor: '#e53935', downColor: '#ffffff',
+    borderUpColor: '#e53935', borderDownColor: '#cfcfcf',
+    wickUpColor: '#e53935', wickDownColor: '#cfcfcf',
+    autoscaleInfoProvider: priceAutoscale,
+  });
+
+  // ---- volume pane (own block) ----
+  const volChart = LightweightCharts.createChart(document.getElementById('volPane'), {
+    autoSize: true, layout, grid, localization,
+    rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 72 },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  function volAutoscale() {
+    const day = DATA[curDate];
+    const lr = priceChart.timeScale().getVisibleLogicalRange();
+    if (!lr || !day) return null;
+    const from = Math.max(0, Math.floor(lr.from));
+    const to = Math.min(day.volumes.length - 1, Math.ceil(lr.to));
+    let hi = 0;
+    for (let i = from; i <= to; i++) if (day.volumes[i].value > hi) hi = day.volumes[i].value;
+    return hi > 0 ? { priceRange: { minValue: 0, maxValue: hi } } : null;
+  }
+  const volSeries = volChart.addHistogramSeries({
+    priceFormat: { type: 'volume' }, autoscaleInfoProvider: volAutoscale,
+  });
+  volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.15, bottom: 0 } });
+
+  // ---- keep the two time scales in sync ----
+  let syncing = false;
+  function link(src, dst) {
+    src.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+      if (syncing || !r) return;
+      syncing = true;
+      dst.timeScale().setVisibleLogicalRange(r);
+      syncing = false;
+      positionNumbers();
+    });
+  }
+  link(priceChart, volChart);
+  link(volChart, priceChart);
+
+  // ---- OHLCV legend ----
+  const legend = document.getElementById('legend');
+  let volByTime = new Map();
   const fmtN = (n) => (n == null ? '-' : n.toLocaleString());
   function renderLegend(c, vol) {
     if (!c || c.open == null) { legend.innerHTML = ''; return; }
-    const up = c.close >= c.open;
-    const col = up ? '#e53935' : '#ffffff';
+    const col = c.close >= c.open ? '#e53935' : '#ffffff';
     legend.innerHTML =
       `<span class="t">${fmtTime(c.time)}</span>`
       + `<span class="k">開</span>${fmtN(c.open)}`
@@ -163,8 +222,6 @@ _TEMPLATE = """<!DOCTYPE html>
       + `<span class="k">收</span><span style="color:${col}">${fmtN(c.close)}</span>`
       + `<span class="k">量</span>${fmtN(vol)}`;
   }
-  // default: latest visible bar of the current day
-  let lastBar = null;
   function setDefaultLegend() {
     const day = DATA[curDate];
     const pass = (d) =>
@@ -177,15 +234,60 @@ _TEMPLATE = """<!DOCTYPE html>
     }
     legend.innerHTML = '';
   }
-  chart.subscribeCrosshairMove((param) => {
-    if (!param.time || !param.seriesData) { setDefaultLegend(); return; }
-    const c = param.seriesData.get(candleSeries);
-    const v = param.seriesData.get(volumeSeries);
-    if (c && c.open != null) renderLegend({ ...c, time: param.time }, v ? v.value : null);
-    else setDefaultLegend();
+  priceChart.subscribeCrosshairMove((param) => {
+    if (param.time && param.seriesData) {
+      const c = param.seriesData.get(candleSeries);
+      const vol = volByTime.get(param.time);
+      if (c && c.open != null) {
+        renderLegend({ ...c, time: param.time }, vol == null ? null : vol);
+        const vy = vol == null ? null : vol;
+        if (vy != null) volChart.setCrosshairPosition(vy, param.time, volSeries);
+        else volChart.clearCrosshairPosition();
+        return;
+      }
+    }
+    volChart.clearCrosshairPosition();
+    setDefaultLegend();
   });
 
-  // populate date dropdown
+  // ---- consecutive-run numbering (day session, from 08:45) ----
+  // Returns the LAST candle of each maximal run of the given direction.
+  function runGroups(day, dir) {
+    const out = [];
+    let runLast = null;
+    for (const c of day.candles) {
+      if (c.session !== 'day') continue;
+      if (c.dir === dir) runLast = c;
+      else if (runLast) { out.push(runLast); runLast = null; }
+    }
+    if (runLast) out.push(runLast);
+    return out;
+  }
+  let curRedMarkers = [];   // numbered above (high)
+  let curBlackMarkers = []; // numbered below (low)
+  function placeNumbers(layer, ts, markers, above, cls) {
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i];
+      const x = ts.timeToCoordinate(m.time);
+      const y = candleSeries.priceToCoordinate(above ? m.high : m.low);
+      if (x == null || y == null) continue;
+      const el = document.createElement('span');
+      el.className = cls;
+      el.textContent = String(i + 1);
+      el.style.left = x + 'px';
+      el.style.top = (above ? y - 4 : y + 4) + 'px';
+      layer.appendChild(el);
+    }
+  }
+  function positionNumbers() {
+    const layer = document.getElementById('numLayer');
+    layer.innerHTML = '';
+    const ts = priceChart.timeScale();
+    placeNumbers(layer, ts, curRedMarkers, true, 'num-red');
+    placeNumbers(layer, ts, curBlackMarkers, false, 'num-black');
+  }
+
+  // ---- date dropdown ----
   const dateSel = document.getElementById('dateSel');
   DATES.forEach((d) => {
     const o = document.createElement('option');
@@ -194,30 +296,42 @@ _TEMPLATE = """<!DOCTYPE html>
     dateSel.appendChild(o);
   });
 
-  // refit=true only on date change / initial load. Session & color filters
-  // keep the current zoom/scroll so candle size does NOT jump.
+  // refit=true only on date change / initial load. Filters keep current zoom.
   function applyFilter(refit) {
     const day = DATA[curDate];
     const pass = (d) =>
       (curSession === 'all' || d.session === curSession) && curDirs.has(d.dir);
-    // Hidden bars become whitespace ({time} only) so visible bars keep their
-    // original time position and do NOT shift/pack forward.
-    candleSeries.setData(day.candles.map((d) => pass(d)
-      ? { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close }
-      : { time: d.time }));
-    volumeSeries.setData(day.volumes.map((d) => pass(d)
-      ? { time: d.time, value: d.value, color: d.color }
-      : { time: d.time }));
-    if (refit) chart.timeScale().fitContent();
+    volByTime = new Map();
+    const candleData = day.candles.map((d) => {
+      if (!pass(d)) return { time: d.time };
+      return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
+    });
+    const volData = day.volumes.map((d) => {
+      if (!pass(d)) return { time: d.time };
+      volByTime.set(d.time, d.value);
+      return { time: d.time, value: d.value, color: d.color };
+    });
+    // numbering only for visible direction(s) and not viewing night-only
+    const dayOk = curSession !== 'night';
+    curRedMarkers = (dayOk && curDirs.has('red')) ? runGroups(day, 'red') : [];
+    curBlackMarkers = (dayOk && curDirs.has('black')) ? runGroups(day, 'black') : [];
+
+    const range = priceChart.timeScale().getVisibleLogicalRange();
+    candleSeries.setData(candleData);
+    volSeries.setData(volData);
+    if (refit) {
+      priceChart.timeScale().fitContent();
+    } else if (range) {
+      priceChart.timeScale().setVisibleLogicalRange(range);
+    }
+    positionNumbers();
     document.getElementById('title').textContent =
       `TX ${day.contract} — ${curDate} ${TF} (${day.bars} bars, vol ${day.vol})`;
     setDefaultLegend();
   }
 
-  // 換日期：重新貼合畫面 (refit)
   dateSel.addEventListener('change', () => { curDate = dateSel.value; applyFilter(true); });
 
-  // 盤別 / 漲跌：保留當前縮放 (不 refit)
   document.querySelectorAll('#sessionSel button').forEach((btn) => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('#sessionSel button').forEach((b) => b.classList.remove('active'));
@@ -241,6 +355,8 @@ _TEMPLATE = """<!DOCTYPE html>
       applyFilter(false);
     });
   });
+
+  window.addEventListener('resize', () => setTimeout(positionNumbers, 50));
 
   applyFilter(true);
 </script>
