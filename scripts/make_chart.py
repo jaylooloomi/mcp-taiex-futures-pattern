@@ -47,7 +47,8 @@ def build(data_dir: str, timeframe: str, out_path: str) -> None:
         doc = json.loads(f.read_text(encoding="utf-8"))
         data[doc["meta"]["trade_date"]] = _build_day(doc)
     dates = sorted(data)
-    default = dates[-1]
+    # default to 2026-05-14 if present, else the latest date
+    default = "2026-05-14" if "2026-05-14" in data else dates[-1]
 
     html = (_TEMPLATE
             .replace("__TF__", timeframe)
@@ -66,9 +67,14 @@ _TEMPLATE = """<!DOCTYPE html>
 <title>TX __TF__</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-  body { margin:0; background:#161a25; color:#d1d4dc; font-family:system-ui,"Segoe UI",sans-serif; }
-  header { display:flex; align-items:center; justify-content:space-between;
+  body { margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden;
+         background:#161a25; color:#d1d4dc; font-family:system-ui,"Segoe UI",sans-serif; }
+  header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
            padding:10px 16px; border-bottom:1px solid #2a2e39; gap:16px; flex-wrap:wrap; }
+  #strategies { flex:0 0 auto; display:flex; flex-direction:column; gap:6px;
+           padding:8px 16px; border-bottom:1px solid #2a2e39; }
+  .strat { display:flex; align-items:center; justify-content:flex-end; gap:12px; flex-wrap:wrap; }
+  .strat-name { font-size:13px; font-weight:600; color:#ffd400; }
   h1 { font-size:15px; font-weight:500; margin:0; white-space:nowrap; }
   .controls { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
   .grp { display:flex; gap:4px; align-items:center; }
@@ -79,7 +85,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .grp button.active { background:#e53935; color:#fff; border-color:#e53935; }
   select { background:#222632; color:#d1d4dc; border:1px solid #2a2e39;
            padding:5px 10px; font-size:13px; border-radius:4px; cursor:pointer; }
-  #wrap { display:flex; flex-direction:column; width:100vw; height:calc(100vh - 54px); }
+  #wrap { flex:1 1 0; min-height:0; display:flex; flex-direction:column; width:100vw; }
   #pricePane { position:relative; flex:3 1 0; min-height:0; }
   #volPane { flex:1 1 0; min-height:0; border-top:1px solid #2a2e39; }
   #legend { position:absolute; top:8px; left:12px; z-index:4; pointer-events:none;
@@ -93,6 +99,10 @@ _TEMPLATE = """<!DOCTYPE html>
   #numLayer .num-count { transform:translate(-50%,-100%); color:#ffd400; }  /* 紅線段計數器(黃色粗體,疊在編號上方) */
   #numLayer .num-black { transform:translate(-50%,0); color:#ffffff; }      /* 黑線段編號(在下方) */
   #numLayer .num-count-dn { transform:translate(-50%,0); color:#ffd400; }   /* 黑線段計數器(黃色粗體,疊在編號下方) */
+  #numLayer .star { transform:translate(-50%,0); color:#4fc3f7; font-size:13px; }  /* 低點轉折小星星(下方) */
+  #numLayer .star-count { transform:translate(-50%,0); color:#4fc3f7; }             /* 低點星星計數器(在星星下方) */
+  #numLayer .star-hi { transform:translate(-50%,-100%); color:#ff9800; font-size:13px; }  /* 高點轉折小星星(上方) */
+  #numLayer .star-hi-count { transform:translate(-50%,-100%); color:#ff9800; }             /* 高點星星計數器(在星星上方) */
 </style>
 </head>
 <body>
@@ -105,8 +115,8 @@ _TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="grp" id="sessionSel">
       <span class="lbl">盤別</span>
-      <button data-session="all" class="active">全日盤</button>
-      <button data-session="day">日盤</button>
+      <button data-session="all">全日盤</button>
+      <button data-session="day" class="active">日盤</button>
       <button data-session="night">夜盤</button>
     </div>
     <div class="grp" id="colorSel">
@@ -114,15 +124,26 @@ _TEMPLATE = """<!DOCTYPE html>
       <button data-dir="red" class="active" title="顯示紅(關閉則隱藏紅)">紅</button>
       <button data-dir="black" class="active" title="顯示黑(關閉則隱藏黑)">黑</button>
     </div>
-    <div class="grp" id="labelSel">
-      <span class="lbl">數字</span>
-      <button data-label="redSeq" class="active" title="紅K 紅色順序編號">紅K紅</button>
-      <button data-label="redCount" class="active" title="紅K 黃色計數器">紅K黃</button>
-      <button data-label="blackSeq" class="active" title="黑K 白色順序編號">黑K黑</button>
-      <button data-label="blackCount" class="active" title="黑K 黃色計數器">黑K黃</button>
-    </div>
   </div>
 </header>
+<div id="strategies">
+  <div class="strat">
+    <span class="strat-name">策略1</span>
+    <div class="grp" id="labelSel">
+      <button data-label="redSeq" title="紅K 紅色順序編號">紅K紅</button>
+      <button data-label="redCount" title="紅K 黃色計數器">上漲波(紅K黃)</button>
+      <button data-label="blackSeq" title="黑K 白色順序編號">黑K黑</button>
+      <button data-label="blackCount" title="黑K 黃色計數器">下跌波(黑K黃)</button>
+    </div>
+  </div>
+  <div class="strat">
+    <span class="strat-name">策略2</span>
+    <div class="grp" id="starSel">
+      <button data-star="low" title="低點轉折星星與計數(一起開關)">數低=下穿(低點星星+數字)</button>
+      <button data-star="high" title="高點轉折星星與計數(一起開關)">數高=上穿(高點星星+數字)</button>
+    </div>
+  </div>
+</div>
 <div id="wrap">
   <div id="pricePane">
     <div id="legend"></div>
@@ -135,7 +156,7 @@ _TEMPLATE = """<!DOCTYPE html>
   const DATES = __DATES__;
   const TF = "__TF__";
   let curDate = "__DEFAULT__";
-  let curSession = 'all';
+  let curSession = 'day';
   const curDirs = new Set(['red', 'black']);
 
   const pad = (n) => String(n).padStart(2, '0');
@@ -283,7 +304,7 @@ _TEMPLATE = """<!DOCTYPE html>
       else if (c.close < prevClose) counter = 0;
       prevClose = c.close;
       return { time: c.time, high: c.high, low: c.low,
-               seq: String(i + 1), counter: String(counter) };
+               seq: String(i + 1), counter: counter === 0 ? '0' : (counter + 1) + '波' };
     });
   }
   // Black segments mirror red: counter +1 when this segment's last close <
@@ -297,12 +318,58 @@ _TEMPLATE = """<!DOCTYPE html>
       else if (c.close > prevClose) counter = 0;
       prevClose = c.close;
       return { time: c.time, high: c.high, low: c.low,
-               seq: String(i + 1), counter: String(counter) };
+               seq: String(i + 1), counter: counter === 0 ? '0' : (counter + 1) + '波' };
     });
   }
+  // Low-pivot star: mark the previous candle's low when its low is higher than
+  // the one before it AND the current candle's low drops below it (a local
+  // swing-high of lows at K[i-1]).
+  // Each star also carries a counter: +1 when this star's low > previous
+  // star's low, reset to 0 when lower (unchanged on equal; first star is 0).
+  function lowPivotStars(day) {
+    const out = [];
+    const c = day.candles;
+    let counter = 0, prevLow = null;
+    for (let i = 2; i < c.length; i++) {
+      if (c[i].low < c[i - 1].low && c[i - 1].low > c[i - 2].low) {
+        const low = c[i - 1].low;
+        if (prevLow === null) counter = 0;
+        else if (low > prevLow) counter += 1;
+        else if (low < prevLow) counter = 0;
+        prevLow = low;
+        out.push({ time: c[i - 1].time, low, counter });
+      }
+    }
+    return out;
+  }
+
+  // High-pivot star (mirror of low pivot): mark the previous candle's high when
+  // its high is lower than the one before it AND the current candle's high rises
+  // above it (a local swing-low of highs at K[i-1]).
+  function highPivotStars(day) {
+    const out = [];
+    const c = day.candles;
+    let counter = 0, prevHigh = null;
+    for (let i = 2; i < c.length; i++) {
+      if (c[i].high > c[i - 1].high && c[i - 1].high < c[i - 2].high) {
+        const high = c[i - 1].high;
+        if (prevHigh === null) counter = 0;
+        else if (high < prevHigh) counter += 1;  // 高點走低 → +1
+        else if (high > prevHigh) counter = 0;    // 高點走高 → 歸零
+        prevHigh = high;
+        out.push({ time: c[i - 1].time, high, counter });
+      }
+    }
+    return out;
+  }
+
   let curRedMarkers = [];   // shown above (high)
   let curBlackMarkers = []; // shown below (low)
-  const showLabel = { redSeq: true, redCount: true, blackSeq: true, blackCount: true };
+  let curStars = [];        // low-pivot stars
+  let curHighStars = [];    // high-pivot stars
+  const showLabel = { redSeq: false, redCount: false, blackSeq: false, blackCount: false };
+  let showStars = false;     // 策略2: low-pivot stars + their counters
+  let showHighStars = false; // high-pivot stars
   function placeNumbers(layer, ts, markers, above, cls, key, dy) {
     for (const m of markers) {
       if (m[key] == null || m[key] === '0') continue;  // hide counter 0 (seq is 1-based)
@@ -325,6 +392,44 @@ _TEMPLATE = """<!DOCTYPE html>
     if (showLabel.redCount) placeNumbers(layer, ts, curRedMarkers, true, 'num-count', 'counter', -22);
     if (showLabel.blackSeq) placeNumbers(layer, ts, curBlackMarkers, false, 'num-black', 'seq', 4);
     if (showLabel.blackCount) placeNumbers(layer, ts, curBlackMarkers, false, 'num-count-dn', 'counter', 22);
+    if (showStars) for (const s of curStars) {
+      const x = ts.timeToCoordinate(s.time);
+      const y = candleSeries.priceToCoordinate(s.low);
+      if (x == null || y == null) continue;
+      const el = document.createElement('span');
+      el.className = 'star';
+      el.textContent = '☆';
+      el.style.left = x + 'px';
+      el.style.top = (y + 2) + 'px';
+      layer.appendChild(el);
+      if (s.counter >= 1) {  // 0 不顯示
+        const cnt = document.createElement('span');
+        cnt.className = 'star-count';
+        cnt.textContent = String(s.counter);
+        cnt.style.left = x + 'px';
+        cnt.style.top = (y + 18) + 'px';
+        layer.appendChild(cnt);
+      }
+    }
+    if (showHighStars) for (const s of curHighStars) {
+      const x = ts.timeToCoordinate(s.time);
+      const y = candleSeries.priceToCoordinate(s.high);
+      if (x == null || y == null) continue;
+      const el = document.createElement('span');
+      el.className = 'star-hi';
+      el.textContent = '☆';
+      el.style.left = x + 'px';
+      el.style.top = (y - 2) + 'px';
+      layer.appendChild(el);
+      if (s.counter >= 1) {  // 0 不顯示
+        const cnt = document.createElement('span');
+        cnt.className = 'star-hi-count';
+        cnt.textContent = String(s.counter);
+        cnt.style.left = x + 'px';
+        cnt.style.top = (y - 18) + 'px';
+        layer.appendChild(cnt);
+      }
+    }
   }
 
   // ---- date dropdown ----
@@ -355,12 +460,20 @@ _TEMPLATE = """<!DOCTYPE html>
     const dayOk = curSession !== 'night';
     curRedMarkers = (dayOk && curDirs.has('red')) ? buildRedMarkers(day) : [];
     curBlackMarkers = (dayOk && curDirs.has('black')) ? buildBlackMarkers(day) : [];
+    curStars = lowPivotStars(day);
+    curHighStars = highPivotStars(day);
 
     const range = priceChart.timeScale().getVisibleLogicalRange();
     candleSeries.setData(candleData);
     volSeries.setData(volData);
     if (refit) {
-      priceChart.timeScale().fitContent();
+      // fit to the passing (visible) bars, not the whitespace-padded full range
+      let first = -1, last = -1;
+      for (let i = 0; i < day.candles.length; i++) {
+        if (pass(day.candles[i])) { if (first < 0) first = i; last = i; }
+      }
+      if (first >= 0) priceChart.timeScale().setVisibleLogicalRange({ from: first - 0.5, to: last + 0.5 });
+      else priceChart.timeScale().fitContent();
     } else if (range) {
       priceChart.timeScale().setVisibleLogicalRange(range);
     }
@@ -402,6 +515,20 @@ _TEMPLATE = """<!DOCTYPE html>
       const k = btn.dataset.label;
       showLabel[k] = !showLabel[k];
       btn.classList.toggle('active', showLabel[k]);
+      positionNumbers();
+    });
+  });
+
+  // 策略2: 一鍵開關低點 / 高點星星 + 計數
+  document.querySelectorAll('#starSel button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.star === 'low') {
+        showStars = !showStars;
+        btn.classList.toggle('active', showStars);
+      } else {
+        showHighStars = !showHighStars;
+        btn.classList.toggle('active', showHighStars);
+      }
       positionNumbers();
     });
   });
