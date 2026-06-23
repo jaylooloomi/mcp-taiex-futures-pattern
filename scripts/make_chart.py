@@ -1,11 +1,17 @@
-"""Generate a standalone multi-date HTML candlestick chart from OHLCV JSON.
+"""Generate a standalone multi-date, multi-timeframe HTML candlestick chart.
 
-Scans a directory for TX_<date>_<timeframe>.json files and embeds every date
-into one HTML with a date dropdown, session selector, and red/black filter.
-Price and volume are drawn in two vertically-stacked, time-synced panes so
-toggling filters never shifts the price candles. Consecutive-red runs in the
-day session are numbered (plain numbers, no marker shape) above the last red
-candle of each run.
+Embeds 1-minute OHLCV per day (the base resolution) and resamples every other
+timeframe in the browser, so adding timeframes never requires regenerating data.
+
+Timeframes (mutually exclusive):
+  intraday (one selected day):  1/2/3/5/8/10/15/30/60 min
+  multi-day overview:
+    日K      one candle per trading day (night + day sessions merged)
+    日夜2根  two candles per trading day (night session, then day session)
+
+Price + volume are two vertically-stacked, time-synced panes. Date / session
+(全日盤/日盤/夜盤) / red-black filters and the 策略1/策略2 feature annotations
+are preserved for intraday timeframes; annotations auto-hide in multi-day modes.
 """
 import json
 import sys
@@ -38,26 +44,24 @@ def _build_day(doc: dict) -> dict:
             "contract": m["contract"]}
 
 
-def build(data_dir: str, timeframe: str, out_path: str) -> None:
-    files = sorted(Path(data_dir).glob(f"TX_*_{timeframe}.json"))
+def build(data_dir: str, out_path: str, base_tf: str = "1min") -> None:
+    files = sorted(Path(data_dir).glob(f"TX_*_{base_tf}.json"))
     if not files:
-        raise SystemExit(f"no TX_*_{timeframe}.json files in {data_dir}")
+        raise SystemExit(f"no TX_*_{base_tf}.json files in {data_dir}")
     data = {}
     for f in files:
         doc = json.loads(f.read_text(encoding="utf-8"))
         data[doc["meta"]["trade_date"]] = _build_day(doc)
     dates = sorted(data)
-    # default to 2026-05-14 if present, else the latest date
-    default = "2026-05-14" if "2026-05-14" in data else dates[-1]
+    default = dates[-1]  # latest trading day
 
     html = (_TEMPLATE
-            .replace("__TF__", timeframe)
             .replace("__DEFAULT__", default)
             .replace("__DATES__", json.dumps(dates))
             .replace("__DATA__", json.dumps(data)))
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_text(html, encoding="utf-8")
-    print(f"wrote {out_path} ({len(dates)} dates, default {default})")
+    print(f"wrote {out_path} ({len(dates)} dates, base {base_tf}, default {default})")
 
 
 _TEMPLATE = """<!DOCTYPE html>
@@ -65,13 +69,15 @@ _TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>TX __TF__</title>
+<title>TX K線</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   body { margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden;
          background:#161a25; color:#d1d4dc; font-family:system-ui,"Segoe UI",sans-serif; }
   header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
            padding:10px 16px; border-bottom:1px solid #2a2e39; gap:16px; flex-wrap:wrap; }
+  #tfBar { flex:0 0 auto; display:flex; align-items:center; gap:4px; flex-wrap:wrap;
+           padding:8px 16px; border-bottom:1px solid #2a2e39; }
   #strategies { flex:0 0 auto; display:flex; flex-direction:column; gap:6px;
            padding:8px 16px; border-bottom:1px solid #2a2e39; }
   .strat { display:flex; align-items:center; justify-content:flex-end; gap:12px; flex-wrap:wrap; }
@@ -84,6 +90,13 @@ _TEMPLATE = """<!DOCTYPE html>
            padding:5px 12px; font-size:13px; border-radius:4px; cursor:pointer; }
   .grp button:hover { color:#d1d4dc; }
   .grp button.active { background:#e53935; color:#fff; border-color:#e53935; }
+  #tfBar .lbl { font-size:12px; color:#6b7280; margin-right:4px; }
+  #tfBar button { background:#222632; color:#9aa0ab; border:1px solid #2a2e39;
+           padding:5px 12px; font-size:13px; border-radius:4px; cursor:pointer; }
+  #tfBar button:hover { color:#d1d4dc; }
+  #tfBar button.active { background:#2962ff; color:#fff; border-color:#2962ff; }
+  #tfBar button.multi.active { background:#9c27b0; border-color:#9c27b0; }
+  #tfBar .sep { width:1px; align-self:stretch; background:#2a2e39; margin:0 6px; }
   select { background:#222632; color:#d1d4dc; border:1px solid #2a2e39;
            padding:5px 10px; font-size:13px; border-radius:4px; cursor:pointer; }
   #wrap { flex:1 1 0; min-height:0; display:flex; flex-direction:column; width:100vw; }
@@ -104,6 +117,8 @@ _TEMPLATE = """<!DOCTYPE html>
   #numLayer .star-count { transform:translate(-50%,0); color:#4fc3f7; }             /* 低點星星計數器(在星星下方) */
   #numLayer .star-hi { transform:translate(-50%,-100%); color:#ff9800; font-size:13px; }  /* 高點轉折小星星(上方) */
   #numLayer .star-hi-count { transform:translate(-50%,-100%); color:#ff9800; }             /* 高點星星計數器(在星星上方) */
+  #numLayer .sess-icon { transform:translate(-50%,-50%); font-size:15px;
+                         filter:drop-shadow(0 0 2px #000); }  /* 日夜2根:☀️/🌙 標在高低中央 */
 
   /* --- RWD: 手機/小螢幕 (桌機樣式不受影響) --- */
   @media (max-width: 640px) {
@@ -112,7 +127,8 @@ _TEMPLATE = """<!DOCTYPE html>
     .controls { gap:8px; width:100%; justify-content:flex-start; }
     .grp { gap:4px; flex-wrap:wrap; }
     .grp .lbl { font-size:11px; }
-    .grp button, select { padding:7px 10px; font-size:13px; }
+    .grp button, select, #tfBar button { padding:7px 10px; font-size:13px; }
+    #tfBar { padding:6px 10px; }
     #strategies { padding:6px 10px; gap:6px; }
     .strat { justify-content:flex-start; }
     .strat-name { font-size:12px; }
@@ -141,8 +157,27 @@ _TEMPLATE = """<!DOCTYPE html>
       <button data-dir="red" class="active" title="顯示紅(關閉則隱藏紅)">紅</button>
       <button data-dir="black" class="active" title="顯示黑(關閉則隱藏黑)">黑</button>
     </div>
+    <div class="grp" id="iconSel" style="display:none">
+      <span class="lbl">標示</span>
+      <button data-icon="sess" class="active" title="日盤☀️ / 夜盤🌙 標在每根高低中央">☀️/🌙</button>
+    </div>
   </div>
 </header>
+<div id="tfBar">
+  <span class="lbl">框架</span>
+  <button data-tf="1min" class="active">1分</button>
+  <button data-tf="2min">2分</button>
+  <button data-tf="3min">3分</button>
+  <button data-tf="5min">5分</button>
+  <button data-tf="8min">8分</button>
+  <button data-tf="10min">10分</button>
+  <button data-tf="15min">15分</button>
+  <button data-tf="30min">30分</button>
+  <button data-tf="60min">60分</button>
+  <span class="sep"></span>
+  <button data-tf="daily" class="multi">日K</button>
+  <button data-tf="session" class="multi" title="每個交易日畫成兩根:夜盤一根、日盤一根">日夜2根</button>
+</div>
 <div id="strategies">
   <div class="strat">
     <span class="strat-name">策略1</span>
@@ -171,20 +206,114 @@ _TEMPLATE = """<!DOCTYPE html>
 <script>
   const DATA = __DATA__;
   const DATES = __DATES__;
-  const TF = "__TF__";
   let curDate = "__DEFAULT__";
+  let curTf = '1min';            // one of INTRADAY keys, 'daily', 'session'
   let curSession = 'day';
   const curDirs = new Set(['red', 'black']);
 
+  const INTRADAY = { '1min':1,'2min':2,'3min':3,'5min':5,'8min':8,
+                     '10min':10,'15min':15,'30min':30,'60min':60 };
+  const TF_LABEL = { ...Object.fromEntries(Object.keys(INTRADAY).map(k=>[k,k])),
+                     daily:'日K (一天一根)', session:'日夜2根 (一天兩根)' };
+
   const pad = (n) => String(n).padStart(2, '0');
+  let view = null;       // { candles, volumes, multiDay }
+  let labelMap = new Map();  // synthetic-time -> display label (multi-day modes)
+
   const fmtTime = (t) => {
+    if (view && view.multiDay && labelMap.has(t)) return labelMap.get(t);
     const d = new Date(t * 1000);
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} `
          + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
   };
+  const tickMark = (t) => {
+    if (view && view.multiDay && labelMap.has(t)) return labelMap.get(t).slice(5); // MM-DD[ 夜/日]
+    const d = new Date(t * 1000);
+    return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  };
   const localization = { timeFormatter: fmtTime };
   const layout = { background: { color: '#161a25' }, textColor: '#d1d4dc' };
   const grid = { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } };
+
+  // ============================================================
+  //  Resampling — everything is derived from the embedded 1-min base
+  // ============================================================
+  function dateEpoch(dateStr, h) {                 // local-wall-clock-as-UTC epoch
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return Math.floor(Date.UTC(y, m - 1, d, h, 0, 0) / 1000);
+  }
+  // Merge a day's parallel candle/volume arrays into working bars with volume.
+  function dayBars(date) {
+    const day = DATA[date];
+    if (!day) return [];
+    return day.candles.map((c, i) => ({
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+      session: c.session, vol: day.volumes[i].value,
+    }));
+  }
+  const colorOf = (dir) => dir === 'red' ? 'rgba(229,57,53,0.6)' : 'rgba(220,220,220,0.6)';
+  function emit(bars, b) {                          // push finalized candle + volume
+    const dir = b.close >= b.open ? 'red' : 'black';
+    bars.candles.push({ time: b.time, open: b.open, high: b.high, low: b.low,
+                        close: b.close, session: b.session, dir });
+    bars.volumes.push({ time: b.time, value: b.vol, session: b.session,
+                        dir, color: colorOf(dir) });
+  }
+  // Intraday: bucket 1-min bars into N-min bars, aligned to each session
+  // segment's start, never spanning the day/night boundary.
+  function resampleIntraday(src, N) {
+    const secs = N * 60, out = { candles: [], volumes: [] };
+    let segStart = null, prevSes = null, bk = null, agg = null;
+    const flush = () => { if (agg) { emit(out, agg); agg = null; } };
+    for (const c of src) {
+      if (c.session !== prevSes) { flush(); segStart = c.time; prevSes = c.session; bk = null; }
+      const b = Math.floor((c.time - segStart) / secs);
+      if (b !== bk) {
+        flush();
+        agg = { time: segStart + b * secs, open: c.open, high: c.high,
+                low: c.low, close: c.close, session: c.session, vol: c.vol };
+        bk = b;
+      } else {
+        if (c.high > agg.high) agg.high = c.high;
+        if (c.low < agg.low) agg.low = c.low;
+        agg.close = c.close; agg.vol += c.vol;
+      }
+    }
+    flush();
+    return out;
+  }
+  // Aggregate many bars into one OHLCV (no time/session).
+  function aggregate(src) {
+    if (!src.length) return null;
+    let o = src[0].open, h = -Infinity, l = Infinity, v = 0, c = src[src.length - 1].close;
+    for (const b of src) { if (b.high > h) h = b.high; if (b.low < l) l = b.low; v += b.vol; }
+    return { open: o, high: h, low: l, close: c, vol: v };
+  }
+
+  function buildView() {
+    labelMap = new Map();
+    if (curTf in INTRADAY) {
+      const out = resampleIntraday(dayBars(curDate), INTRADAY[curTf]);
+      return { candles: out.candles, volumes: out.volumes, multiDay: false };
+    }
+    const out = { candles: [], volumes: [] };
+    for (const date of DATES) {
+      const src = dayBars(date);
+      if (!src.length) continue;
+      if (curTf === 'daily') {
+        const a = aggregate(src); if (!a) continue;
+        const t = dateEpoch(date, 12);
+        labelMap.set(t, date);
+        emit(out, { time: t, session: 'day', ...a });
+      } else {                                       // session: 夜盤 then 日盤
+        const night = aggregate(src.filter(b => b.session === 'night'));
+        const day = aggregate(src.filter(b => b.session === 'day'));
+        if (night) { const t = dateEpoch(date, 3);  labelMap.set(t, date + ' 夜'); emit(out, { time: t, session: 'night', ...night }); }
+        if (day)   { const t = dateEpoch(date, 11); labelMap.set(t, date + ' 日'); emit(out, { time: t, session: 'day', ...day }); }
+      }
+    }
+    return { candles: out.candles, volumes: out.volumes, multiDay: true };
+  }
 
   // ---- price pane (candles) ----
   const priceChart = LightweightCharts.createChart(document.getElementById('pricePane'), {
@@ -193,18 +322,16 @@ _TEMPLATE = """<!DOCTYPE html>
     timeScale: { visible: false, borderColor: '#2a2e39' },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
-  // Price scale follows ALL candles in the visible time window (including
-  // ones hidden by the red/black filter), so toggling filters never rescales
-  // the right axis and the candles stay put vertically.
+  // Price scale follows ALL candles in the visible window (including ones hidden
+  // by the red/black filter), so toggling filters never rescales the axis.
   function priceAutoscale() {
-    const day = DATA[curDate];
     const lr = priceChart.timeScale().getVisibleLogicalRange();
-    if (!lr || !day) return null;
+    if (!lr || !view) return null;
     const from = Math.max(0, Math.floor(lr.from));
-    const to = Math.min(day.candles.length - 1, Math.ceil(lr.to));
+    const to = Math.min(view.candles.length - 1, Math.ceil(lr.to));
     let lo = Infinity, hi = -Infinity;
     for (let i = from; i <= to; i++) {
-      const c = day.candles[i];
+      const c = view.candles[i]; if (!c) continue;
       if (c.low < lo) lo = c.low;
       if (c.high > hi) hi = c.high;
     }
@@ -222,17 +349,17 @@ _TEMPLATE = """<!DOCTYPE html>
   const volChart = LightweightCharts.createChart(document.getElementById('volPane'), {
     autoSize: true, layout, grid, localization,
     rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 72 },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39',
+                 tickMarkFormatter: tickMark },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
   function volAutoscale() {
-    const day = DATA[curDate];
     const lr = priceChart.timeScale().getVisibleLogicalRange();
-    if (!lr || !day) return null;
+    if (!lr || !view) return null;
     const from = Math.max(0, Math.floor(lr.from));
-    const to = Math.min(day.volumes.length - 1, Math.ceil(lr.to));
+    const to = Math.min(view.volumes.length - 1, Math.ceil(lr.to));
     let hi = 0;
-    for (let i = from; i <= to; i++) if (day.volumes[i].value > hi) hi = day.volumes[i].value;
+    for (let i = from; i <= to; i++) if (view.volumes[i] && view.volumes[i].value > hi) hi = view.volumes[i].value;
     return hi > 0 ? { priceRange: { minValue: 0, maxValue: hi } } : null;
   }
   const volSeries = volChart.addHistogramSeries({
@@ -269,13 +396,13 @@ _TEMPLATE = """<!DOCTYPE html>
       + `<span class="k">收</span><span style="color:${col}">${fmtN(c.close)}</span>`
       + `<span class="k">量</span>${fmtN(vol)}`;
   }
+  const pass = (d) =>
+    (curTf === 'daily' || curSession === 'all' || d.session === curSession) && curDirs.has(d.dir);
   function setDefaultLegend() {
-    const day = DATA[curDate];
-    const pass = (d) =>
-      (curSession === 'all' || d.session === curSession) && curDirs.has(d.dir);
-    for (let i = day.candles.length - 1; i >= 0; i--) {
-      if (pass(day.candles[i])) {
-        renderLegend(day.candles[i], day.volumes[i].value);
+    if (!view) { legend.innerHTML = ''; return; }
+    for (let i = view.candles.length - 1; i >= 0; i--) {
+      if (pass(view.candles[i])) {
+        renderLegend(view.candles[i], view.volumes[i].value);
         return;
       }
     }
@@ -287,8 +414,7 @@ _TEMPLATE = """<!DOCTYPE html>
       const vol = volByTime.get(param.time);
       if (c && c.open != null) {
         renderLegend({ ...c, time: param.time }, vol == null ? null : vol);
-        const vy = vol == null ? null : vol;
-        if (vy != null) volChart.setCrosshairPosition(vy, param.time, volSeries);
+        if (vol != null) volChart.setCrosshairPosition(vol, param.time, volSeries);
         else volChart.clearCrosshairPosition();
         return;
       }
@@ -297,12 +423,14 @@ _TEMPLATE = """<!DOCTYPE html>
     setDefaultLegend();
   });
 
-  // ---- consecutive-run segments (day session, from 08:45) ----
+  // ============================================================
+  //  Feature annotations (策略1/策略2) — intraday day-session only
+  // ============================================================
   // Returns the LAST candle of each maximal run of the given direction.
-  function runGroups(day, dir) {
+  function runGroups(cs, dir) {
     const out = [];
     let runLast = null;
-    for (const c of day.candles) {
+    for (const c of cs) {
       if (c.session !== 'day') continue;
       if (c.dir === dir) runLast = c;
       else if (runLast) { out.push(runLast); runLast = null; }
@@ -310,12 +438,9 @@ _TEMPLATE = """<!DOCTYPE html>
     if (runLast) out.push(runLast);
     return out;
   }
-  // Red segments carry both a sequential number (seq) and a momentum counter:
-  // counter +1 when this segment's last close > previous red segment's last
-  // close, reset to 0 when lower, unchanged on equal; first segment is 0.
-  function buildRedMarkers(day) {
+  function buildRedMarkers(cs) {
     let counter = 0, prevClose = null;
-    return runGroups(day, 'red').map((c, i) => {
+    return runGroups(cs, 'red').map((c, i) => {
       if (prevClose === null) counter = 0;
       else if (c.close > prevClose) counter += 1;
       else if (c.close < prevClose) counter = 0;
@@ -324,12 +449,9 @@ _TEMPLATE = """<!DOCTYPE html>
                seq: String(i + 1), counter: counter === 0 ? '0' : (counter + 1) + '波' };
     });
   }
-  // Black segments mirror red: counter +1 when this segment's last close <
-  // previous black segment's last close (lower low), reset to 0 when higher,
-  // unchanged on equal; first segment is 0.
-  function buildBlackMarkers(day) {
+  function buildBlackMarkers(cs) {
     let counter = 0, prevClose = null;
-    return runGroups(day, 'black').map((c, i) => {
+    return runGroups(cs, 'black').map((c, i) => {
       if (prevClose === null) counter = 0;
       else if (c.close < prevClose) counter += 1;
       else if (c.close > prevClose) counter = 0;
@@ -338,58 +460,44 @@ _TEMPLATE = """<!DOCTYPE html>
                seq: String(i + 1), counter: counter === 0 ? '0' : (counter + 1) + '波' };
     });
   }
-  // Low-pivot star: mark the previous candle's low when its low is higher than
-  // the one before it AND the current candle's low drops below it (a local
-  // swing-high of lows at K[i-1]).
-  // Each star also carries a counter: +1 when this star's low > previous
-  // star's low, reset to 0 when lower (unchanged on equal; first star is 0).
-  function lowPivotStars(day) {
+  function lowPivotStars(cs) {
     const out = [];
-    const c = day.candles;
     let counter = 0, prevLow = null;
-    for (let i = 2; i < c.length; i++) {
-      if (c[i].low < c[i - 1].low && c[i - 1].low > c[i - 2].low) {
-        const low = c[i - 1].low;
+    for (let i = 2; i < cs.length; i++) {
+      if (cs[i].low < cs[i - 1].low && cs[i - 1].low > cs[i - 2].low) {
+        const low = cs[i - 1].low;
         if (prevLow === null) counter = 0;
         else if (low > prevLow) counter += 1;
         else if (low < prevLow) counter = 0;
         prevLow = low;
-        out.push({ time: c[i - 1].time, low, counter });
+        out.push({ time: cs[i - 1].time, low, counter });
       }
     }
     return out;
   }
-
-  // High-pivot star (mirror of low pivot): mark the previous candle's high when
-  // its high is lower than the one before it AND the current candle's high rises
-  // above it (a local swing-low of highs at K[i-1]).
-  function highPivotStars(day) {
+  function highPivotStars(cs) {
     const out = [];
-    const c = day.candles;
     let counter = 0, prevHigh = null;
-    for (let i = 2; i < c.length; i++) {
-      if (c[i].high > c[i - 1].high && c[i - 1].high < c[i - 2].high) {
-        const high = c[i - 1].high;
+    for (let i = 2; i < cs.length; i++) {
+      if (cs[i].high > cs[i - 1].high && cs[i - 1].high < cs[i - 2].high) {
+        const high = cs[i - 1].high;
         if (prevHigh === null) counter = 0;
-        else if (high < prevHigh) counter += 1;  // 高點走低 → +1
-        else if (high > prevHigh) counter = 0;    // 高點走高 → 歸零
+        else if (high < prevHigh) counter += 1;
+        else if (high > prevHigh) counter = 0;
         prevHigh = high;
-        out.push({ time: c[i - 1].time, high, counter });
+        out.push({ time: cs[i - 1].time, high, counter });
       }
     }
     return out;
   }
 
-  let curRedMarkers = [];   // shown above (high)
-  let curBlackMarkers = []; // shown below (low)
-  let curStars = [];        // low-pivot stars
-  let curHighStars = [];    // high-pivot stars
+  let curRedMarkers = [], curBlackMarkers = [], curStars = [], curHighStars = [];
   const showLabel = { redSeq: false, redCount: false, blackSeq: false, blackCount: false };
-  let showStars = false;     // 策略2: low-pivot stars + their counters
-  let showHighStars = false; // high-pivot stars
+  let showStars = false, showHighStars = false;
+  let showSessionIcons = true;   // 日夜2根:☀️/🌙 標示(預設開,可關)
   function placeNumbers(layer, ts, markers, above, cls, key, dy) {
     for (const m of markers) {
-      if (m[key] == null || m[key] === '0') continue;  // hide counter 0 (seq is 1-based)
+      if (m[key] == null || m[key] === '0') continue;
       const x = ts.timeToCoordinate(m.time);
       const y = candleSeries.priceToCoordinate(above ? m.high : m.low);
       if (x == null || y == null) continue;
@@ -414,17 +522,13 @@ _TEMPLATE = """<!DOCTYPE html>
       const y = candleSeries.priceToCoordinate(s.low);
       if (x == null || y == null) continue;
       const el = document.createElement('span');
-      el.className = 'star';
-      el.textContent = '☆';
-      el.style.left = x + 'px';
-      el.style.top = (y + 2) + 'px';
+      el.className = 'star'; el.textContent = '☆';
+      el.style.left = x + 'px'; el.style.top = (y + 2) + 'px';
       layer.appendChild(el);
-      if (s.counter >= 1) {  // 0 不顯示
+      if (s.counter >= 1) {
         const cnt = document.createElement('span');
-        cnt.className = 'star-count';
-        cnt.textContent = String(s.counter);
-        cnt.style.left = x + 'px';
-        cnt.style.top = (y + 18) + 'px';
+        cnt.className = 'star-count'; cnt.textContent = String(s.counter);
+        cnt.style.left = x + 'px'; cnt.style.top = (y + 18) + 'px';
         layer.appendChild(cnt);
       }
     }
@@ -433,18 +537,29 @@ _TEMPLATE = """<!DOCTYPE html>
       const y = candleSeries.priceToCoordinate(s.high);
       if (x == null || y == null) continue;
       const el = document.createElement('span');
-      el.className = 'star-hi';
-      el.textContent = '☆';
-      el.style.left = x + 'px';
-      el.style.top = (y - 2) + 'px';
+      el.className = 'star-hi'; el.textContent = '☆';
+      el.style.left = x + 'px'; el.style.top = (y - 2) + 'px';
       layer.appendChild(el);
-      if (s.counter >= 1) {  // 0 不顯示
+      if (s.counter >= 1) {
         const cnt = document.createElement('span');
-        cnt.className = 'star-hi-count';
-        cnt.textContent = String(s.counter);
-        cnt.style.left = x + 'px';
-        cnt.style.top = (y - 18) + 'px';
+        cnt.className = 'star-hi-count'; cnt.textContent = String(s.counter);
+        cnt.style.left = x + 'px'; cnt.style.top = (y - 18) + 'px';
         layer.appendChild(cnt);
+      }
+    }
+    // 日夜2根:在每根可見 K 棒高低中央標 ☀️(日盤) / 🌙(夜盤)
+    if (curTf === 'session' && showSessionIcons && view) {
+      for (const c of view.candles) {
+        if (!pass(c)) continue;
+        const x = ts.timeToCoordinate(c.time);
+        const y = candleSeries.priceToCoordinate((c.high + c.low) / 2);
+        if (x == null || y == null) continue;
+        const el = document.createElement('span');
+        el.className = 'sess-icon';
+        el.textContent = c.session === 'day' ? '☀️' : '🌙';
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        layer.appendChild(el);
       }
     }
   }
@@ -458,36 +573,47 @@ _TEMPLATE = """<!DOCTYPE html>
     dateSel.appendChild(o);
   });
 
-  // refit=true only on date change / initial load. Filters keep current zoom.
+  function recenterToDate(date) {                    // scroll multi-day view to a date
+    let idx = -1;
+    for (let i = 0; i < view.candles.length; i++) {
+      const lab = labelMap.get(view.candles[i].time) || '';
+      if (lab.startsWith(date)) { idx = i; break; }
+    }
+    if (idx < 0) return;
+    const half = curTf === 'session' ? 16 : 25;
+    priceChart.timeScale().setVisibleLogicalRange({ from: idx - half, to: idx + half });
+  }
+
+  // refit=true only on date / timeframe change. Filter toggles keep current zoom.
   function applyFilter(refit) {
-    const day = DATA[curDate];
-    const pass = (d) =>
-      (curSession === 'all' || d.session === curSession) && curDirs.has(d.dir);
+    view = buildView();
     volByTime = new Map();
-    const candleData = day.candles.map((d) => {
+    const candleData = view.candles.map((d) => {
       if (!pass(d)) return { time: d.time };
       return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
     });
-    const volData = day.volumes.map((d) => {
+    const volData = view.volumes.map((d) => {
       if (!pass(d)) return { time: d.time };
       volByTime.set(d.time, d.value);
       return { time: d.time, value: d.value, color: d.color };
     });
-    // numbering only for visible direction(s) and not viewing night-only
-    const dayOk = curSession !== 'night';
-    curRedMarkers = (dayOk && curDirs.has('red')) ? buildRedMarkers(day) : [];
-    curBlackMarkers = (dayOk && curDirs.has('black')) ? buildBlackMarkers(day) : [];
-    curStars = lowPivotStars(day);
-    curHighStars = highPivotStars(day);
+    // feature annotations: intraday day-session only
+    const intraday = !view.multiDay;
+    document.getElementById('strategies').style.display = intraday ? '' : 'none';
+    document.getElementById('iconSel').style.display = (curTf === 'session') ? '' : 'none';
+    const dayOk = intraday && curSession !== 'night';
+    curRedMarkers = (dayOk && curDirs.has('red')) ? buildRedMarkers(view.candles) : [];
+    curBlackMarkers = (dayOk && curDirs.has('black')) ? buildBlackMarkers(view.candles) : [];
+    curStars = intraday ? lowPivotStars(view.candles) : [];
+    curHighStars = intraday ? highPivotStars(view.candles) : [];
 
     const range = priceChart.timeScale().getVisibleLogicalRange();
     candleSeries.setData(candleData);
     volSeries.setData(volData);
     if (refit) {
-      // fit to the passing (visible) bars, not the whitespace-padded full range
       let first = -1, last = -1;
-      for (let i = 0; i < day.candles.length; i++) {
-        if (pass(day.candles[i])) { if (first < 0) first = i; last = i; }
+      for (let i = 0; i < view.candles.length; i++) {
+        if (pass(view.candles[i])) { if (first < 0) first = i; last = i; }
       }
       if (first >= 0) priceChart.timeScale().setVisibleLogicalRange({ from: first - 0.5, to: last + 0.5 });
       else priceChart.timeScale().fitContent();
@@ -495,12 +621,40 @@ _TEMPLATE = """<!DOCTYPE html>
       priceChart.timeScale().setVisibleLogicalRange(range);
     }
     positionNumbers();
-    document.getElementById('title').textContent =
-      `TX ${day.contract} — ${curDate} ${TF} (${day.bars} bars, vol ${day.vol})`;
+
+    const contract = (DATA[curDate] || DATA[DATES[DATES.length - 1]]).contract;
+    if (view.multiDay) {
+      document.getElementById('title').textContent =
+        `TX ${contract} — ${TF_LABEL[curTf]} · ${DATES.length} 天 (${view.candles.length} 根)`;
+    } else {
+      const day = DATA[curDate];
+      document.getElementById('title').textContent =
+        `TX ${contract} — ${curDate} ${TF_LABEL[curTf]} (${view.candles.length} 根, 量 ${day.vol})`;
+    }
     setDefaultLegend();
   }
 
-  dateSel.addEventListener('change', () => { curDate = dateSel.value; applyFilter(true); });
+  dateSel.addEventListener('change', () => {
+    curDate = dateSel.value;
+    if (view && view.multiDay) recenterToDate(curDate);
+    else applyFilter(true);
+  });
+
+  document.querySelectorAll('#tfBar button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#tfBar button').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      curTf = btn.dataset.tf;
+      // entering a multi-day mode: show every bar by default (日夜2根 needs both
+      // sessions visible), but the session filter still works afterwards.
+      if (curTf === 'daily' || curTf === 'session') {
+        curSession = 'all';
+        document.querySelectorAll('#sessionSel button')
+          .forEach((b) => b.classList.toggle('active', b.dataset.session === 'all'));
+      }
+      applyFilter(true);
+    });
+  });
 
   document.querySelectorAll('#sessionSel button').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -515,18 +669,15 @@ _TEMPLATE = """<!DOCTYPE html>
     btn.addEventListener('click', () => {
       const dir = btn.dataset.dir;
       if (curDirs.has(dir)) {
-        if (curDirs.size === 1) return;  // 不可全部取消
-        curDirs.delete(dir);
-        btn.classList.remove('active');
+        if (curDirs.size === 1) return;
+        curDirs.delete(dir); btn.classList.remove('active');
       } else {
-        curDirs.add(dir);
-        btn.classList.add('active');
+        curDirs.add(dir); btn.classList.add('active');
       }
       applyFilter(false);
     });
   });
 
-  // 數字顯示/隱藏（可複選，即時切換不影響縮放）
   document.querySelectorAll('#labelSel button').forEach((btn) => {
     btn.addEventListener('click', () => {
       const k = btn.dataset.label;
@@ -536,16 +687,18 @@ _TEMPLATE = """<!DOCTYPE html>
     });
   });
 
-  // 策略2: 一鍵開關低點 / 高點星星 + 計數
   document.querySelectorAll('#starSel button').forEach((btn) => {
     btn.addEventListener('click', () => {
-      if (btn.dataset.star === 'low') {
-        showStars = !showStars;
-        btn.classList.toggle('active', showStars);
-      } else {
-        showHighStars = !showHighStars;
-        btn.classList.toggle('active', showHighStars);
-      }
+      if (btn.dataset.star === 'low') { showStars = !showStars; btn.classList.toggle('active', showStars); }
+      else { showHighStars = !showHighStars; btn.classList.toggle('active', showHighStars); }
+      positionNumbers();
+    });
+  });
+
+  document.querySelectorAll('#iconSel button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      showSessionIcons = !showSessionIcons;
+      btn.classList.toggle('active', showSessionIcons);
       positionNumbers();
     });
   });
@@ -561,6 +714,5 @@ _TEMPLATE = """<!DOCTYPE html>
 
 if __name__ == "__main__":
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "data/ohlcv"
-    timeframe = sys.argv[2] if len(sys.argv) > 2 else "1min"
-    out = sys.argv[3] if len(sys.argv) > 3 else f"charts/TX_{timeframe}.html"
-    build(data_dir, timeframe, out)
+    out = sys.argv[2] if len(sys.argv) > 2 else "docs/index.html"
+    build(data_dir, out)
