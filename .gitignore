@@ -2,8 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 .uv/
+# Raw tick CSVs are large and would burn Git LFS bandwidth on every clone, so
+# they are kept LOCAL only and NOT committed. data/ohlcv/*.json (1min, ~4MB) IS
+# committed so the chart rebuilds without re-downloading the tick.
 data/raw/
-data/ohlcv/
 data_samples/
 *.zip
 .pytest_cache/
